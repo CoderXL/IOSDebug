@@ -2,9 +2,6 @@
 //  utility.h
 //  utility
 //
-//  Created by baidu on 16/10/10.
-//  Copyright © 2016年 baidu. All rights reserved.
-//
 
 #ifndef utility_h
 #define utility_h

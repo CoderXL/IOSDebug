@@ -1,10 +1,4 @@
-//
-//  listapp.m
-//  utility
-//
-//  Created by baidu on 2016/10/24.
-//  Copyright © 2016年 baidu. All rights reserved.
-//
+
 
 #import <Foundation/Foundation.h>
 #include <dlfcn.h>

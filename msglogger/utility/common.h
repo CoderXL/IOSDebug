@@ -1,10 +1,3 @@
-//
-//  common.h
-//  utility
-//
-//  Created by baidu on 2016/10/24.
-//  Copyright © 2016年 baidu. All rights reserved.
-//
 
 #ifndef common_h
 #define common_h
