@@ -162,10 +162,6 @@ class GDBRemoteCommunicationClient(object):
     packet_queue = Queue.Queue()    #packet queue
     packet_lock = thread.allocate_lock()
 
-    # runtime info
-    module_info = []
-    thread_info = []
-    register_info = []
     mainname = ""
     mainbase = 0
     mainsize = 0
@@ -299,11 +295,11 @@ class GDBRemoteCommunicationClient(object):
         self.msg_lock.release()
         print "insert:", msg
 
-    def GetCurrentIns(self):
-        if "EIP" in self.register_info:
-            insoff = self.register_info["EIP"]
-        elif "PC" in self.register_info:
-            insoff = self.register_info["PC"]
+    def GetCurrentIns(self, thread_inforegister_info):
+        if "EIP" in thread_inforegister_info:
+            insoff = thread_inforegister_info["EIP"]
+        elif "PC" in thread_inforegister_info:
+            insoff = thread_inforegister_info["PC"]
         return insoff
 
     def init(self):
@@ -349,20 +345,30 @@ class GDBRemoteCommunicationClient(object):
 
         # fake moduleload event
         maintid = self.GetDefaultThreadID()
-        self.register_info = self.ReadAllRegisters(maintid)
-        self.module_info = self.GetLoadedModuleList()
-        self.thread_info = self.GetCurrentThreadIDs()
-        insoff = self.GetCurrentIns()
+        thread_inforegister_info = self.ReadAllRegisters(maintid)
+        insoff = self.GetCurrentIns(thread_inforegister_info)
 
         msg = {"eid": PROCESS_START, "tid": maintid, "name": self.mainname, "base": self.mainbase,
-               "size": self.mainsize, "rebase_to": self.mainbase, "ea": insoff}
+               "size": self.mainsize, "rebase_to": self.mainbase, "ea": insoff, "handled": True}
         self.InsertMsg(msg)
 
-        msg = {"eid": EXCEPTION, "tid": maintid, "ea": insoff, "code": 0xAA55,
+        for tid in self.GetCurrentThreadIDs():
+            thread_inforegister_info = self.ReadAllRegisters(maintid)
+            ea = self.GetCurrentIns(thread_inforegister_info)
+            msg = {"eid": THREAD_START, "tid": tid, "handled": True, "ea": ea}
+            self.InsertMsg(msg)
+
+        #for mod in self.GetLoadedModuleList():
+        #    if mod["name"] != self.mainname:
+        #        msg = {"eid": LIBRARY_LOAD, "tid": maintid, "name":mod["name"], "base":  mod["begin"],
+        #               "size":mod["size"], "rebase_to": mod["rebase_to"], "handled": True}
+
+        #EXCEPTION msg must be the last one
+        msg = {"eid": EXCEPTION, "tid": maintid, "ea": insoff, "code": 0xAA55, "can_cont": True,
                "info": "initial break", "handled": False}
         self.InsertMsg(msg)
         #
-        # for mod in self.module_info:
+        # for mod in module_info:
         #     base = mod["begin"]
         #     name = mod["name"]
         #     size = mod["size"]
@@ -378,8 +384,8 @@ class GDBRemoteCommunicationClient(object):
         #         #                self.msgQueue.put_nowait(msg)
         #
         # # fake threadstart event
-        # for thread in self.thread_info:
-        #     msg = {"eid": THREAD_START, "tid": self.thread_info[thread]["id"], "ea": 0}
+        # for thread in thread_info:
+        #     msg = {"eid": THREAD_START, "tid": thread_info[thread]["id"], "ea": 0}
         #     #           print "insert:", msg
         #     #           self.msgQueue.put_nowait(msg)  #need ea?
         # msg = {"eid": PROCESS_SUSPEND, "tid": self.GetDefaultThreadID(), "ea": 0x400000}
@@ -488,7 +494,7 @@ class GDBRemoteCommunicationClient(object):
                     self.connected = True
                     return True
                 retry = retry + 1
-                time.sleep(0.5)
+                time.sleep(0.1)
         return False
 
     def SendPacketAndWaitForResponse(self, request, raw = False):
@@ -559,7 +565,7 @@ class GDBRemoteCommunicationClient(object):
         success = False
         self.socket.send(self.make_general_packet("QStartNoAckMode"))
         while retry < HANDSHAKE_RETRYTIME:
-            response = self.ReadPacket(1)
+            response = self.ReadPacket(0.1)
             print "handshakeresponse:%d"%(len(response))
             if self.GetResponseType(response) == self.eOK:
                 success = True
@@ -754,16 +760,16 @@ class GDBRemoteCommunicationClient(object):
         """
         retry = 0
         response = self.SendPacketAndWaitForResponse("qC")
-        success = False
-        while not success:
+        while True:
             if type(response) != str or len(response) <= 2:
                 response = self.SendPacketAndWaitForResponse("qC")
             if response[0] == 'Q' and response[1] == 'C':
                 try:
                     return int(response[2:], 16)
                 except:
-                    pass
-        return -1
+                    retry = retry + 1
+            if retry > DEFAULT_RETRYTIME:
+                raise
 
     def GetHostInfo(self):
         """
@@ -1035,6 +1041,8 @@ class GDBRemoteCommunicationClient(object):
                                 if modsize > 0x4000000:
                                     return 0x1C + size_of_load_commands  # contain mach-o header
                             off = off + commandsize
+                    elif file_type == IOS_MH_DYLIB:
+                        return 0x1C + size_of_load_commands  # contain mach-o header
                     else:
                         return -1
                     if file_type == IOS_MH_EXECUTE:
@@ -1153,16 +1161,22 @@ class GDBRemoteCommunicationClient(object):
                 infoArrayCount = self.ReadRemoteInt(dyld_all_image_infos + 4, 4)
                 if infoArray is None or infoArrayCount is None:
                     return None
-                for i in range(0, infoArrayCount):
-                    imageLoadAddress = self.ReadRemoteInt(infoArray + i * 12, 4)
-                    imageFilePathPtr = self.ReadRemoteInt(infoArray + i * 12 + 4, 4)
-                    imageFilePath = self.ReadRemoteString(imageFilePathPtr)
-                    if imageLoadAddress is None or imageFilePathPtr is None or imageFilePath is None:
-                        break
-                    imageSize = self.AnalysisModuleAndGetSize(imageLoadAddress, imageFilePath)
-                    if imageSize != -1:
-                        module_info.append({"name": imageFilePath, "begin": imageLoadAddress, "size": imageSize})
-                        break #for test
+                i = 0
+                while i < infoArrayCount:
+                    try:
+                        imageLoadAddress = self.ReadRemoteInt(infoArray + i * 12, 4)
+                        imageFilePathPtr = self.ReadRemoteInt(infoArray + i * 12 + 4, 4)
+                        imageFilePath = self.ReadRemoteString(imageFilePathPtr)
+                        if imageLoadAddress is None or imageFilePathPtr is None or imageFilePath is None:
+                            break
+                        imageSize = self.AnalysisModuleAndGetSize(imageLoadAddress, imageFilePath)
+                        if imageSize != -1:
+                            module_info.append({"name": imageFilePath, "begin": imageLoadAddress, "size": imageSize})
+                    except Exception as e:
+                        print "memory error"
+                        continue
+                    i = i + 1
+
         return module_info
 
     def RunShellCommand(self, cmd):
@@ -1607,7 +1621,7 @@ def proxy_get_debug_event():
         return None   # wen won't handle event util the initialize success
     client.msg_lock.acquire()
     if not client.msgQueue.empty():
-        event = client.msgQueue.get()
+        event = client.msgQueue.get_nowait()
     client.msg_lock.release()
     return event
 
@@ -1630,22 +1644,31 @@ def proxy_thread_continue():
 def proxy_set_resume_mode():
     pass
 
-def proxy_read_registers(tid):
+def proxy_read_registers(tid, regs):
     global client
     if client is None or not client.connected:
         return None
-    client.register_info = client.ReadAllRegisters(tid)
+    try:
+        client.register_info = client.ReadAllRegisters(tid)
+    except Exception as e:
+        print "read register error:", e
     regvals = []
-    for reg in client.reg_layout:
-        regvals.append(client.register_info[reg["name"]])
+    if client.register_info == None:
+        return regvals
+    for reg in regs:
+        if reg in client.register_info:
+            regvals.append(client.register_info[reg])
+        else:
+            regvals.append(0)
+            print "%s not in result" % reg
     return regvals
 
-def proxy_write_register(tid, regidx, value):
+def proxy_write_register(tid, regname, value):
     global client
     if client is None or not client.connected:
         return None
     reg_data = {}
-    reg_data[client.reg_layout[regidx]] = value
+    reg_data[regname] = value
     return client.WriteAllRegisters(tid, reg_data)
 
 def proxy_thread_get_sreg_base():
@@ -1882,7 +1905,6 @@ while True:
     except Exception as e:
         print e
 '''
-#if DEBUG:
-#    proxy_init_debugger("localhost", 111, "")
-#    print proxy_get_debug_event()
-#    print proxy_get_debug_event()
+if DEBUG:
+    proxy_init_debugger("localhost", 111, "")
+    #proxy_read_registers(1)
