@@ -353,10 +353,13 @@ class GDBRemoteCommunicationClient(object):
         self.InsertMsg(msg)
 
         for tid in self.GetCurrentThreadIDs():
-            thread_inforegister_info = self.ReadAllRegisters(maintid)
-            ea = self.GetCurrentIns(thread_inforegister_info)
-            msg = {"eid": THREAD_START, "tid": tid, "handled": True, "ea": ea}
-            self.InsertMsg(msg)
+            try:
+                thread_inforegister_info = self.ReadAllRegisters(maintid)
+                ea = self.GetCurrentIns(thread_inforegister_info)
+                msg = {"eid": THREAD_START, "tid": tid, "handled": True, "ea": ea}
+                self.InsertMsg(msg)
+            except:
+                pass
 
         #for mod in self.GetLoadedModuleList():
         #    if mod["name"] != self.mainname:
