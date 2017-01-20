@@ -10,9 +10,9 @@ import Queue
 import time
 import pydevd
 
-DEBUG = 1
+DEBUG = False
 
-DEFAULT_TIMEOUT = 0.05  # in the future this should be self dynamicly adapted denpend on network
+DEFAULT_TIMEOUT = 0.01  # in the future this should be self dynamicly adapted denpend on network
 DEFAULT_RETRYTIME = 3
 HANDSHAKE_RETRYTIME = 5
 
@@ -51,6 +51,11 @@ REGISTER_CS = 0x0020
 REGISTER_SS = 0x0040
 REGISTER_NOLF = 0x0080
 REGISTER_CUSTFMT = 0x010
+
+SEGPERM_EXEC  = 1
+SEGPERM_WRITE = 2
+SEGPERM_READ  = 4
+SEGPERM_MAXVAL = SEGPERM_EXEC + SEGPERM_WRITE + SEGPERM_READ
 
 dt_byte = 0
 dt_word = 1
@@ -165,6 +170,7 @@ class GDBRemoteCommunicationClient(object):
     mainname = ""
     mainbase = 0
     mainsize = 0
+    segments = []
 
     # cpu register info [name offset size],[name offset size]
     # lldb:readfrom qRegisterInfo?   gdb:readfrom qXfer:features:read:arm-core.xml:0,fff
@@ -302,7 +308,71 @@ class GDBRemoteCommunicationClient(object):
             insoff = thread_inforegister_info["PC"]
         return insoff
 
-    def init(self):
+    def update_debuggee_info(self):# second stage init && update module/thread/segments
+        msgarr = []
+
+        # fake moduleload event
+        maintid = self.GetDefaultThreadID()
+        thread_inforegister_info = self.ReadAllRegisters(maintid)
+        insoff = self.GetCurrentIns(thread_inforegister_info)
+
+        msg = {"eid": PROCESS_START, "tid": maintid, "name": self.mainname, "base": self.mainbase,
+               "size": self.mainsize, "rebase_to": self.mainbase, "ea": insoff, "handled": True, "ismain": True}
+        msgarr.append(msg)
+
+        # update thread info
+        for tid in self.GetCurrentThreadIDs():
+            thread_inforegister_info = self.ReadAllRegisters(tid)
+            ea = self.GetCurrentIns(thread_inforegister_info)
+            msg = {"eid": THREAD_START, "tid": tid, "handled": True, "ea": ea}
+            msgarr.append(msg)
+
+        self.segments = []
+        #update module info
+        current_modules = self.GetLoadedModuleList()
+        for mod in current_modules:
+            if mod["name"] != self.mainname:
+                msg = {"eid": LIBRARY_LOAD, "tid": maintid, "name":mod["name"], "base":  mod["begin"],
+                       "size":mod["size"], "rebase_to": mod["begin"], "handled": True}
+                msgarr.append(msg)
+                if "segment" in mod:
+                    self.segments = self.segments + mod["segment"]
+
+        #EXCEPTION msg must be the last one
+        msg = {"eid": EXCEPTION, "tid": maintid, "ea": insoff, "code": 0xAA55, "can_cont": True,
+               "info": "initial break", "handled": False}
+        msgarr.append(msg)
+
+        for mmsg in msgarr:
+            self.InsertMsg(mmsg)
+
+        self.inited = True
+        print "init ok"
+
+    def __del__(self):
+        self.socket.close()
+        self.connected = False
+        self.readthread = None
+        print "end connection"
+
+    def __init__(self, socket):  # first stage init
+        #pydevd.settrace('localhost', port=1111, stdoutToServer = True, stderrToServer = True)
+        self.socket = socket
+        self.socket.settimeout(1)
+
+        if not self.use_sync:
+            self.readthread = threading.Thread(target = self.ReadPacketThread)
+            self.readthread.start()
+            self.connected = False
+        else:
+            self.connected = True
+
+        if not self.HandshakeWithServer():
+            raise ValueError("handshake failed")  # cannot establish connection
+        self.socket.settimeout(None)
+        self.GetRemoteQSupported()
+        self.SetCurrentThread(0)
+
         # determine debugger_type and cpu_type
         if self.GetQXferFeaturesReadSupported():
             # see if debugger is gdb
@@ -343,85 +413,9 @@ class GDBRemoteCommunicationClient(object):
         if self.debugger_type == -1:
             raise  # we cannot handle this yet
 
-        # fake moduleload event
-        maintid = self.GetDefaultThreadID()
-        thread_inforegister_info = self.ReadAllRegisters(maintid)
-        insoff = self.GetCurrentIns(thread_inforegister_info)
-
-        msg = {"eid": PROCESS_START, "tid": maintid, "name": self.mainname, "base": self.mainbase,
-               "size": self.mainsize, "rebase_to": self.mainbase, "ea": insoff, "handled": True}
-        self.InsertMsg(msg)
-
-        for tid in self.GetCurrentThreadIDs():
-            try:
-                thread_inforegister_info = self.ReadAllRegisters(maintid)
-                ea = self.GetCurrentIns(thread_inforegister_info)
-                msg = {"eid": THREAD_START, "tid": tid, "handled": True, "ea": ea}
-                self.InsertMsg(msg)
-            except:
-                pass
-
-        #for mod in self.GetLoadedModuleList():
-        #    if mod["name"] != self.mainname:
-        #        msg = {"eid": LIBRARY_LOAD, "tid": maintid, "name":mod["name"], "base":  mod["begin"],
-        #               "size":mod["size"], "rebase_to": mod["rebase_to"], "handled": True}
-
-        #EXCEPTION msg must be the last one
-        msg = {"eid": EXCEPTION, "tid": maintid, "ea": insoff, "code": 0xAA55, "can_cont": True,
-               "info": "initial break", "handled": False}
-        self.InsertMsg(msg)
-        #
-        # for mod in module_info:
-        #     base = mod["begin"]
-        #     name = mod["name"]
-        #     size = mod["size"]
-        #     if base != self.mainbase:
-        #         msg = {"eid": LIBRARY_LOAD, "tid": maintid, "ea": base, "name": name, "base": base,
-        #                "size": size, "rebase_to": base}
-        #         print "insert:", msg
-        #         self.msgQueue.put_nowait(msg)
-        #     else:
-        #         msg = {"eid": LIBRARY_LOAD, "tid": maintid, "ea": base, "name": name, "base": base,
-        #                "size": size, "ismain": True}
-        #         #               print "insert:", msg
-        #         #                self.msgQueue.put_nowait(msg)
-        #
-        # # fake threadstart event
-        # for thread in thread_info:
-        #     msg = {"eid": THREAD_START, "tid": thread_info[thread]["id"], "ea": 0}
-        #     #           print "insert:", msg
-        #     #           self.msgQueue.put_nowait(msg)  #need ea?
-        # msg = {"eid": PROCESS_SUSPEND, "tid": self.GetDefaultThreadID(), "ea": 0x400000}
-        # self.msgQueue.put_nowait(msg)
-
-        self.inited = True
-        print "init ok"
-
-    def __del__(self):
-        self.socket.close()
-        self.connected = False
-        self.readthread = None
-        print "end connection"
-
-    def __init__(self, socket):
-        #pydevd.settrace('localhost', port=1111, stdoutToServer = True, stderrToServer = True)
-        self.socket = socket
-        self.socket.settimeout(1)
-
-        if not self.use_sync:
-            self.readthread = threading.Thread(target = self.ReadPacketThread)
-            self.readthread.start()
-            self.connected = False
-        else:
-            self.connected = True
-
-        if not self.HandshakeWithServer():
-            raise ValueError("handshake failed")  # cannot establish connection
-        self.socket.settimeout(None)
-        self.GetRemoteQSupported()
-        self.SetCurrentThread(0)
         # put other things in init() in case block ida
-        self.init()
+        if DEBUG:
+            self.update_debuggee_info()
 
         return
 
@@ -515,7 +509,7 @@ class GDBRemoteCommunicationClient(object):
                     return response
             except Exception as e:
                 return None
-        return packet
+        return None
 
     def GetResponseType(self, input):
         if type(input) != str or len(input) == 0:
@@ -1024,45 +1018,55 @@ class GDBRemoteCommunicationClient(object):
 
     def AnalysisModuleAndGetSize(self, modbegin, modname):
         type = 0 # 1 -> macho  2 -> dex  3 -> elf 4 -> apk
-        try:
-            magic = self.ReadRemoteInt(modbegin, 4)
-            modsize = 0
-            if magic in [IOS_MH_MAGIC, IOS_MH_CIGAM, IOS_MH_MAGIC_64, IOS_MH_CIGAM_64]:
-                type = 1
-                if magic == IOS_MH_MAGIC:
-                    file_type = self.ReadRemoteInt(modbegin + 0xC, 4)
-                    size_of_load_commands = self.ReadRemoteInt(modbegin + 0x14, 4)
-                    command_data = binascii.unhexlify(self.DoReadMemory(modbegin + 0x1C, size_of_load_commands))
-                    off = 0
-                    if file_type == IOS_MH_EXECUTE:
-                        while off < size_of_load_commands:
-                            command, commandsize = struct.unpack("2I", command_data[off: off + 8])
-                            if command == LC_SEGMENT:
-                                segment_name, vm_address, vm_size = struct.unpack("16s2I", command_data[off + 8: off + 32])
-                                if vm_address + vm_size > modsize:
-                                    modsize = vm_address + vm_size
-                                if modsize > 0x4000000:
-                                    return 0x1C + size_of_load_commands  # contain mach-o header
-                            off = off + commandsize
-                    elif file_type == IOS_MH_DYLIB:
-                        return 0x1C + size_of_load_commands  # contain mach-o header
-                    else:
-                        return -1
+        #while True:
+            #try:
+        magic = self.ReadRemoteInt(modbegin, 4)
+        modsize = 0
+        segments = []
+        if magic in [IOS_MH_MAGIC, IOS_MH_CIGAM, IOS_MH_MAGIC_64, IOS_MH_CIGAM_64]:
+            type = 1
+            if magic == IOS_MH_MAGIC:
+                file_type = self.ReadRemoteInt(modbegin + 0xC, 4)
+                size_of_load_commands = self.ReadRemoteInt(modbegin + 0x14, 4)
+                command_data_hex = self.DoReadMemory(modbegin + 0x1C, size_of_load_commands)
+                #try:
+                command_data = binascii.unhexlify(command_data_hex)
+                #except Exception as e:
+                #    print "unhexlify", command_data_hex
+                #    continue
+
+                off = 0
+                if file_type in [IOS_MH_EXECUTE, IOS_MH_DYLIB]:
+                    while off < size_of_load_commands:
+                        command, commandsize = struct.unpack("2I", command_data[off: off + 8])
+                        if command == LC_SEGMENT:
+                            segment_name, vm_address, vm_size = struct.unpack("16s2I", command_data[off + 8: off + 32])
+                            if vm_address + vm_size > modsize:
+                                modsize = vm_address + vm_size
+                            segments.append({"name":segment_name, "sclass":segment_name, "startEA":modbegin + vm_address,
+                                "endEA":modbegin + vm_address + vm_size, "perm":7})
+                        off = off + commandsize
                     if file_type == IOS_MH_EXECUTE:
                         self.mainbase = modbegin
                         self.mainsize = modsize
                         self.mainname = modname
+                    return modsize, segments
+                elif file_type == IOS_MH_DYLIB:
+                    return 0x1C + size_of_load_commands, segments  # contain mach-o header
                 else:
-                    pass  # todo
-            elif magic in [ANDROID_DEX, ANDROID_ODEX]:
-                type = 2 # todo
-            elif magic in [ANDROID_ELF]:
-                type = 3 # todo
-            elif magic in [ANDROID_APK]:
-                type = 4 # todo
-        except:
-            pass
-        return modsize
+                    return -1, None
+
+            else:
+                pass  # todo
+        elif magic in [ANDROID_DEX, ANDROID_ODEX]:
+            type = 2 # todo
+        elif magic in [ANDROID_ELF]:
+            type = 3 # todo
+        elif magic in [ANDROID_APK]:
+            type = 4 # todo
+            #except Exception as e:
+            #    print "AnalysisModuleAndGetSize ", e
+        return None, None
 
     def ReadRemoteInt(self, addr, size):
         # for lldb
@@ -1121,14 +1125,14 @@ class GDBRemoteCommunicationClient(object):
                 return None
             dom = xml.dom.minidom.parseString(xmldata)
             for library in dom.getElementsByTagName("library"):
-                try:
-                    modname = library.getAttribute("name")
-                    modbegin = int(library.getAttribute("l_addr"), 16)
-                    modsize = self.AnalysisModuleAndGetSize(modbegin, modname)
-                    if modsize != -1:
-                        module_info.append({"name": modname, "begin": modbegin, "size": modsize})
-                except:
-                    pass
+                #try:
+                modname = library.getAttribute("name")
+                modbegin = int(library.getAttribute("l_addr"), 16)
+                modsize, segment = self.AnalysisModuleAndGetSize(modbegin, modname)
+                if modsize != -1:
+                    module_info.append({"name": modname, "begin": modbegin, "size": modsize})
+                #except:
+                #    pass
         elif self.debugger_type == self.DEBUGGER_TYPE_LLDB:
             dyld_all_image_infos = self.GetShlibInfoAddr()
             Is_target_64bit = False
@@ -1155,7 +1159,7 @@ class GDBRemoteCommunicationClient(object):
                     imageLoadAddress = self.ReadRemoteInt(infoArray + i * 24, 8)
                     imageFilePathPtr = self.ReadRemoteInt(infoArray + i * 24 + 8, 8)
                     imageFilePath = self.ReadRemoteString(imageFilePathPtr)
-                    imageSize = self.AnalysisModuleAndGetSize(imageLoadAddress, imageFilePath)
+                    imageSize, = self.AnalysisModuleAndGetSize(imageLoadAddress, imageFilePath)
                     if imageSize != -1:
                         module_info.append({"name": imageFilePath, "begin": imageLoadAddress, "size": imageSize})
                         break # for test
@@ -1171,10 +1175,11 @@ class GDBRemoteCommunicationClient(object):
                         imageFilePathPtr = self.ReadRemoteInt(infoArray + i * 12 + 4, 4)
                         imageFilePath = self.ReadRemoteString(imageFilePathPtr)
                         if imageLoadAddress is None or imageFilePathPtr is None or imageFilePath is None:
-                            break
-                        imageSize = self.AnalysisModuleAndGetSize(imageLoadAddress, imageFilePath)
+                            continue
+                        imageSize, segment = self.AnalysisModuleAndGetSize(imageLoadAddress, imageFilePath)
+                        print "modname=%s %d/%d" % (imageFilePath, i, infoArrayCount)
                         if imageSize != -1:
-                            module_info.append({"name": imageFilePath, "begin": imageLoadAddress, "size": imageSize})
+                            module_info.append({"name": imageFilePath, "begin": imageLoadAddress, "size": imageSize, "segment":segment})
                     except Exception as e:
                         print "memory error"
                         continue
@@ -1524,6 +1529,12 @@ def proxy_init_debugger(hostname, portnum, password):
         client.socket.close()
     return success
 
+def proxy_init_debuggee():
+    global client
+    if client is None:
+        return None
+    return client.update_debuggee_info()
+
 def proxy_get_register_layout():
     print "proxy_get_register_layout"
     global client
@@ -1678,7 +1689,11 @@ def proxy_thread_get_sreg_base():
     pass
 
 def proxy_get_memory_info():
-    pass
+    global client
+    if client is None:
+        return None
+    return client.segments
+    # "name":segment_name, "sclass":segment_name, "startEA":modbegin + vm_address, "endEA":modbegin + vm_address + vm_size, "perm":7
 
 def proxy_read_memory(ea, size):
     global client
@@ -1909,5 +1924,9 @@ while True:
         print e
 '''
 if DEBUG:
-    proxy_init_debugger("localhost", 111, "")
+    try:
+        proxy_init_debugger("localhost", 111, "")
+        print proxy_get_memory_info()
+    except Exception as e:
+        print e
     #proxy_read_registers(1)

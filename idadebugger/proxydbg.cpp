@@ -59,8 +59,8 @@ idainfo get_inf()
 #define PAGE_SIZE 0x1000
 #define PROCESS_NAME "Remote Process"
 #define PROCESS_PID 123
-
-#define DEBUG true
+#define COMPARE_BYTES 256
+#define DEBUG false
 
 /*
 notice:
@@ -102,7 +102,7 @@ static struct register_info_t registers[MAX_REG_NUM] = {
 	{ "SP", REGISTER_ADDRESS | REGISTER_SP, REGISTER_CLASS, dt_dword, NULL, 0 },
 	{ "LR", REGISTER_ADDRESS, REGISTER_CLASS,  dt_dword, NULL, 0 },
 	{ "PC", REGISTER_ADDRESS | REGISTER_IP, REGISTER_CLASS, dt_dword, NULL, 0 },
-	{ "PSR", 0, REGISTER_CLASS, dt_dword, arm_flags, 0xF80000FF },
+	{ "CPSR", 0, REGISTER_CLASS, dt_dword, arm_flags, 0xF80000FF },
 	{ 0, 0, 0, 0, 0, 0} //mark for last one
 };
 
@@ -221,7 +221,8 @@ char* proxynames[] =
 	"proxy_rexec",
 	"proxy_get_debapp_attrs",
 	"proxy_get_register_layout",
-	"proxy_raw"
+	"proxy_raw",
+	"proxy_init_debuggee",
 };
 
 unordered_map<const char*, PyObject*> pFuncs;
@@ -279,6 +280,8 @@ idaman void ida_export enable_packet_cli(bool enable)
 		remove_command_interpreter(&cli_packet);
 }
 //-------------------------------------------------------------------------
+
+
 
 int idaapi plugin_init(void)
 {
@@ -457,6 +460,17 @@ bool idaapi proxy_is_tracing_enabled(thid_t tid, int tracebit)
 	return false;
 }
 
+void proxy_init_debuggee(void*)
+{
+	PyGILState_STATE gstate = PyGILState_Ensure();
+	if (pFuncs[__FUNCTION__] != 0)
+	{
+		PyObject* pFunc = pFuncs[__FUNCTION__];
+		PyObject* pResult = PyObject_CallObject(pFunc, 0);
+	}
+	PyGILState_Release(gstate);
+}
+
 bool idaapi proxy_init_debugger(const char * hostname, int portnum, const char * password)
 {
 	if (inf.filetype == 0)
@@ -539,6 +553,8 @@ bool idaapi proxy_init_debugger(const char * hostname, int portnum, const char *
 			retval = PyObject_IsTrue(pResult);
 		}
 		PyGILState_Release(gstate);
+
+		_beginthread(proxy_init_debuggee, 0, 0);
 	}
 	return retval != 0; //True -> 1
 }
@@ -653,7 +669,7 @@ gdecode_t idaapi proxy_get_debug_event(debug_event_t *event, int timeout_ms)
 					PyObject* eaobj = PyDict_GetItemString(pResult, "ea");
 					if (eaobj != 0 && PyInt_Check(eaobj))
 					{
-						if (sizeof(event->tid) == 8)
+						if (sizeof(event->tid) == 8) // do better in the future
 							event->ea = PyInt_AsUnsignedLongLongMask(eaobj);
 						else
 							event->ea = PyInt_AsUnsignedLongMask(eaobj);
@@ -702,13 +718,17 @@ gdecode_t idaapi proxy_get_debug_event(debug_event_t *event, int timeout_ms)
 							else
 								event->modinfo.rebase_to = PyInt_AsUnsignedLongMask(rebaseobj);
 						}
-						PyObject* ismainobj = PyDict_GetItemString(pResult, "ismain");
-						if (ismainobj != 0 && PyObject_IsTrue(ismainobj))
+						event->handled = true;
+
+						// if this module match loaded file name, we would rebase file into memory
+						char filename[256];
+						get_root_filename(filename, 256);
+						if (strstr(event->modinfo.name, filename) != 0)
 						{
 							//do rebase
 							rebase_program(event->modinfo.base - inf.minEA, 0);
 						}
-						event->handled = true;
+
 						msg(__FUNCTION__" %d\n", eid);
 						break;
 					}
@@ -973,14 +993,8 @@ ssize_t idaapi proxy_write_file(int fn, uint32 off, const void * buf, size_t siz
 int idaapi proxy_get_memory_info(meminfo_vec_t &areas)
 {
 	msg(__FUNCTION__"\n");
-	meminfo_vec_t::iterator itor = areas.begin();
-	while (itor != areas.end())
-	{
-		msg("memory:name=%s sclass=%s startEA=%x endEA=%x sbase=%x bitness=%x perm=%x\n", 
-			(*itor).name.c_str(), (*itor).sclass.c_str(), (*itor).startEA, (*itor).endEA,
-			(*itor).sbase, (*itor).bitness, (*itor).perm);
-		++itor;
-	}
+	// proxy to python 
+	int retval = -2;
 
 	if (DEBUG)
 	{
@@ -994,10 +1008,56 @@ int idaapi proxy_get_memory_info(meminfo_vec_t &areas)
 		info.sbase = 0x10;
 		
 		areas.add_unique(info);
-		return 1;
+		retval = 1;
+	}
+	else
+	{
+		PyGILState_STATE gstate = PyGILState_Ensure();
+		if (pFuncs[__FUNCTION__] != 0)
+		{
+			PyObject* pFunc = pFuncs[__FUNCTION__];
+			PyObject* pResult = PyObject_CallObject(pFunc, 0);
+			if (PyList_Check(pResult))
+			{
+				for (int i = 0; i < PyList_Size(pResult); i++)
+				{
+					memory_info_t meminfo;
+					memset(&meminfo, 0, sizeof(meminfo));
+					PyObject* memitem = PyList_GetItem(pResult, i);
+					if (PyDict_Check(memitem))
+					{
+						PyObject* nameitem = PyDict_GetItemString(memitem, "name");
+						if (!PyString_Check(nameitem))
+							continue;
+						meminfo.name = PyString_AsString(nameitem);
+						PyObject* sclassitem = PyDict_GetItemString(memitem, "sclass");
+						if (!PyString_Check(sclassitem))
+							continue;
+						meminfo.sclass = PyString_AsString(sclassitem);
+						PyObject* startEAitem = PyDict_GetItemString(memitem, "startEA");
+						if (!PyInt_Check(startEAitem))
+							continue;
+						meminfo.startEA = PyInt_AsLong(startEAitem);
+						PyObject* endEAitem = PyDict_GetItemString(memitem, "endEA");
+						if (!PyInt_Check(endEAitem))
+							continue;
+						meminfo.endEA = PyInt_AsLong(endEAitem);
+						PyObject* permitem = PyDict_GetItemString(memitem, "perm");
+						if (!PyInt_Check(permitem))
+							continue;
+						meminfo.perm = PyInt_AsLong(permitem);
+						meminfo.bitness = 1;
+
+						areas.add_unique(meminfo);
+					}
+				}
+			}
+			retval = 1;
+		}
+		PyGILState_Release(gstate);
 	}
 
-	return -2;
+	return retval;
 }
 
 /// Read process memory.
@@ -1032,6 +1092,36 @@ ssize_t idaapi proxy_read_memory(ea_t ea, void *buffer, size_t size)
 			}
 		}
 		PyGILState_Release(gstate);
+	}
+
+	return size;
+}
+
+ssize_t idaapi proxy_read_memory(ea_t ea, void *buffer, size_t size, bool sync)
+{
+	msg(__FUNCTION__" %x %x\n", ea, size);
+	//proxy to python
+	int retval = 0;
+
+	if (DEBUG)
+	{
+		memset(buffer, 0xcc, size);
+		retval = size;
+	}
+	else
+	{
+		if (pFuncs[__FUNCTION__] != 0)
+		{
+			PyObject* pFunc = pFuncs[__FUNCTION__];
+			PyObject* pArgs = PyTuple_New(2);
+			PyTuple_SetItem(pArgs, 0, Py_BuildValue("i", ea));
+			PyTuple_SetItem(pArgs, 1, Py_BuildValue("i", size));
+			PyObject* pResult = PyObject_CallObject(pFunc, 0);
+			if (PyString_Check(pResult))
+			{
+				memcpy(buffer, PyString_AsString(pResult), size);
+			}
+		}
 	}
 
 	return size;
