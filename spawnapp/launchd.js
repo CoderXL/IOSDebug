@@ -1,7 +1,8 @@
+//'use strict';
+//var Memory = global.Memory;
+//var Process = global.Process;
+//var rpc = global.rpc;
 'use strict';
-Memory = global.Memory;
-Process = global.Process;
-rpc = global.rpc;
 
 var readU16 = Memory.readU16;
 var writeU16 = Memory.writeU16;
@@ -14,12 +15,12 @@ var POSIX_SPAWN_START_SUSPENDED = 0x0080;
 var specidentifier = null;
 
 rpc.exports = {
-  prepareForLaunch: function (identifier) {
+  prepareforlaunch: function (identifier) {
     specidentifier = identifier;
   },
-  cancelLaunch: function (identifier) {
-    specidentifier = null;
-  }
+ // finishlaunch: function () {
+ //   specidentifier = null;
+ // },
 };
 
 //  /usr/lib/system/libsystem_kernel.dylib
@@ -42,16 +43,22 @@ Interceptor.replace(posix_spawn_ptr, new NativeCallback(function(pid_np, path_np
             }
         }
     }
+
     if(match){//do we need this?
         var flags = readU16(attrp_np);
         flags |= POSIX_SPAWN_START_SUSPENDED;
-        writeU16(attrs, flags);
+        writeU16(attrp_np, flags);
     }
+
     var ret = posix_spawn(pid_np, path_np, actions_np, attrp_np, argv_np, envp_np);
-    if(match && ret >= 0){
-        send([event, identifier, readU32(pid_np)]);
-        identifier = null;
+    if(match){
+        if(ret >= 0){
+            send([specidentifier, readU32(pid_np)]);
+            specidentifier = null;
+        }
     }
+
     return ret;
 }, 'int', ['pointer', 'pointer', 'pointer', 'pointer', 'pointer', 'pointer']))
 
+console.log("launchd init ok");

@@ -713,6 +713,37 @@ PLIST_API void plist_from_bin(const char *plist_bin, uint32_t length, plist_t * 
     free(bplist.used_indexes);
 }
 
+static plist_t parse_bin_node_at_index(struct bplist_data *bplist, uint32_t node_index)
+{
+    int i;
+    const char* ptr;
+    plist_t plist;
+
+    ptr = bplist->data + UINT_TO_HOST(bplist->offset_table + node_index * bplist->offset_size, bplist->offset_size);
+    /* make sure the node offset is in a sane range */
+    if ((ptr < bplist->data) || (ptr >= bplist->offset_table)) {
+        return NULL;
+    }
+
+    /* store node_index for current recursion level */
+    bplist->used_indexes[bplist->level] = node_index;
+    /* recursion check */
+    if (bplist->level > 0) {
+        for (i = bplist->level-1; i >= 0; i--) {
+            if (bplist->used_indexes[i] == bplist->used_indexes[bplist->level]) {
+                fprintf(stderr, "Recursion detected in binary plist. Aborting.\n");
+                return NULL;
+            }
+        }
+    }
+
+    /* finally parse node */
+    bplist->level++;
+    plist = parse_bin_node(bplist, &ptr);
+    bplist->level--;
+    return plist;
+}
+
 static unsigned int plist_data_hash(const void* key)
 {
     plist_data_t data = plist_get_data((plist_t) key);
