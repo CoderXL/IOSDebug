@@ -18,4 +18,13 @@
 		存在的问题：
 		对于大的可执行文件由于msgSend相当频繁，因此不推荐hook msgSend方式，可以考虑使用frida或cycript hook某些selector
 		
+# spawnapp
+		解决frida -f com.**  拉起式附加失败的问题
+		0.pc端发送请求给ios端
+		1.ios端执行js hook注launchd的/usr/lib/system/libsystem_kernel.dylib的__posix_spawn，作用主要是接收进程创建成功的pid及修改启动SUSPEND标志(launchd.js)
+		2.利用SpringBoard服务启动app，spawn函数启动普通进程(frida-helper-backend-glue.m)
+		3.启动结束进入js得到进程pid，通知pc端成功
+
+
+		
 交流群560017652欢迎讨论
