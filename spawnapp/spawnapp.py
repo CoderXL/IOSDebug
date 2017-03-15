@@ -1,3 +1,4 @@
+#usage python spawnapp.py -U -f com.apple.weather
 import codecs
 import frida
 import time, os, sys
