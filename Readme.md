@@ -25,6 +25,29 @@
 		2.利用SpringBoard服务启动app，spawn函数启动普通进程(frida-helper-backend-glue.m)
 		3.启动结束进入js得到进程pid，通知pc端成功
 
+# 动态脱壳
+		由于dumpdecrypted工具必须要使用启动命令行进行，且受权限影响，在某些机型不能成功，这里采用frida注入+dumpdecrypted脱壳方式解决
+		手动脱壳：
+		第一步：
+		// 将dumpdecrypted.dylib放在应用可读路径，比如/var/mobile/Containers/Bundle/Application/C7FC26EF-9AA5-41E8-827E-59F64B2AFF68/BWA.app
+		第二步：
 
+		D:\tmp>frida -Up 2741
+			 ____
+			/ _  |   Frida 10.3.14 - A world-class dynamic instrumentation framework
+		   | (_| |
+			> _  |   Commands:
+		   /_/ |_|       help      -> Displays the help system
+		   . . . .       object?   -> Display information about 'object'
+		   . . . .       exit/quit -> Exit
+		   . . . .
+		   . . . .   More info at http://www.frida.re/docs/home/
+		[iPhone::PID::2741]->
+		// 获取dlopen函数
+		var dlopen=new NativeFunction(Module.findExportByName(null, "dlopen"), 'pointer', ['pointer', 'long'])
+		 dlopen(Memory.allocUtf8String("/var/mobile/Containers/Bundle/Application/C7FC26EF-9AA5-41E8-827E-59F64B2AFF68/BWA.app/1.dylib"), 1)
+		第三步：
+		 cat /var/log/syslog看到输出，取出文件
+ 
 		
 交流群560017652欢迎讨论
